@@ -22,42 +22,45 @@ rerun = st.sidebar.button("🔄 다른 조합으로 재배정")
 
 if uploaded_file:
     xls = pd.ExcelFile(uploaded_file)
-    teacher_df = xls.parse('교사 목록')
-    timetable_df = xls.parse('시간표')
+    df_raw = xls.parse('교사 목록', header=None)
 
-    # 교사 정보 분리
-    homeroom_teachers = {}
-    other_teachers = []
-    for _, row in teacher_df.iterrows():
-        name = row['이름']
-        if pd.isna(row['담임학년']) or pd.isna(row['담임반']):
-            other_teachers.append(name)
-        else:
-            homeroom_teachers[name] = f"{int(row['담임학년'])}-{int(row['담임반'])}"
+    # 담임 및 전담 교사 정리
+    homeroom_raw = df_raw.iloc[:, 1:4].dropna(how='all')
+    homeroom_raw.columns = ['학급', '이름', '담당교과']
+    homeroom_raw = homeroom_raw.dropna()
+    subject_raw = df_raw.iloc[:, 5:7].dropna(how='all')
+    subject_raw.columns = ['이름', '담당교과']
+    subject_raw = subject_raw.dropna()
 
-    all_teachers = list(homeroom_teachers.keys()) + other_teachers
-    available_slots = defaultdict(list)
+    homeroom_raw['담임여부'] = True
+    homeroom_raw['담임학년'] = homeroom_raw['학급'].str.extract(r'(\d)학년').astype(float)
+    homeroom_raw['담임반'] = homeroom_raw['학급'].str.extract(r'(\d)반').astype(float)
+    subject_raw['담임여부'] = False
+    subject_raw['담임학년'] = None
+    subject_raw['담임반'] = None
 
-    for _, row in timetable_df.iterrows():
-        name = row['이름']
-        if name not in all_teachers:
-            continue
-        for col in timetable_df.columns[1:]:
-            if row[col] == '공강':
-                available_slots[col].append(name)
+    teacher_df = pd.concat([
+        homeroom_raw[['이름', '담당교과', '담임여부', '담임학년', '담임반']],
+        subject_raw[['이름', '담당교과', '담임여부', '담임학년', '담임반']]
+    ], ignore_index=True)
+
+    all_teachers = teacher_df['이름'].tolist()
+
+    # 가상의 시간표 시간대 정의 (예: 1교시~6교시 3일)
+    time_slots = [f"{day}일차 {period}교시" for day in range(1, 4) for period in range(1, 7)]
 
     schedule = defaultdict(lambda: {'정감독': [], '부감독': []})
     total_assignments = Counter()
     role_counts = defaultdict(lambda: {'정감독': 0, '부감독': 0})
 
-    for time, candidates in available_slots.items():
-        random.shuffle(candidates)
+    for time in time_slots:
+        random.shuffle(all_teachers)
         assigned = set()
         role_slots = {'정감독': total_rooms, '부감독': total_rooms}
 
         for role in ['정감독', '부감독']:
             for _ in range(role_slots[role]):
-                eligible = [c for c in candidates if c not in assigned and total_assignments[c] < min(total_assignments.values(), default=0) + 2]
+                eligible = [c for c in all_teachers if c not in assigned and total_assignments[c] < min(total_assignments.values(), default=0) + 2]
                 if not eligible:
                     break
                 selected = random.choice(eligible)
