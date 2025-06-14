@@ -1,102 +1,109 @@
+# assigner.py
 import pandas as pd
-import streamlit as st
-from collections import defaultdict, Counter
+from collections import defaultdict
 import random
-import tempfile
 
-st.title("시험 감독 배정 프로그램")
+def assign_supervisors(teacher_df, schedule_df, n_class1, n_class2, n_class3, teacher_exclude):
+    # 교사 담당과목 정리
+    teacher_part = teacher_df.iloc[:, [5, 6]].dropna()
+    teacher_part.columns = ['이름', '담당과목']
+    teacher_list = teacher_part['이름'].tolist()
+    subject_map = dict(zip(teacher_part['이름'], teacher_part['담당과목']))
 
-# 사용자 입력
-st.sidebar.header("학급 정보 입력")
-class_counts = {
-    '1학년': st.sidebar.number_input("1학년 반 수", min_value=1, max_value=10, value=5),
-    '2학년': st.sidebar.number_input("2학년 반 수", min_value=1, max_value=10, value=5),
-    '3학년': st.sidebar.number_input("3학년 반 수", min_value=1, max_value=10, value=5),
-}
+    # 시험 시간표 정리
+    exam_schedule = schedule_df.iloc[4:].copy()
+    exam_schedule.columns = schedule_df.iloc[3]
+    exam_schedule.reset_index(drop=True, inplace=True)
+    grades = exam_schedule['학년 \ 교시'].tolist()
+    period_subjects = exam_schedule.drop(columns='학년 \ 교시')
+    period_subjects.columns = [
+        '첫째날_1교시', '첫째날_2교시', '첫째날_3교시',
+        '둘째날_1교시', '둘째날_2교시', '둘째날_3교시',
+        '셋째날_1교시', '셋째날_2교시', '셋째날_3교시', '여분']
+    period_subjects = period_subjects.iloc[:, :-1]  # 여분 제거
 
-total_rooms = sum(class_counts.values())
-st.sidebar.markdown(f"**총 시험실 수: {total_rooms}개**")
+    반정보 = {
+        '1학년': [f'1-{i+1}' for i in range(n_class1)],
+        '2학년': [f'2-{i+1}' for i in range(n_class2)],
+        '3학년': [f'3-{i+1}' for i in range(n_class3)],
+    }
 
-uploaded_file = st.sidebar.file_uploader("교사 목록 및 시간표 파일 업로드 (.xlsx)", type=["xlsx"])
-rerun = st.sidebar.button("🔄 다른 조합으로 재배정")
+    schedule_data = []
+    for i, grade in enumerate(grades):
+        for j, col in enumerate(period_subjects.columns):
+            subject = period_subjects.iloc[i, j]
+            if pd.notna(subject):
+                for 반 in 반정보[grade]:
+                    schedule_data.append({
+                        '학년': grade,
+                        '반': 반,
+                        '교시': col,
+                        '과목': subject.strip()
+                    })
 
-if uploaded_file:
-    xls = pd.ExcelFile(uploaded_file)
-    df_raw = xls.parse('교사 목록', header=None)
+    df = pd.DataFrame(schedule_data)
 
-    # 담임 및 전담 교사 정리
-    homeroom_raw = df_raw.iloc[:, 1:4].dropna(how='all')
-    homeroom_raw.columns = ['학급', '이름', '담당교과']
-    homeroom_raw = homeroom_raw.dropna()
-    subject_raw = df_raw.iloc[:, 5:7].dropna(how='all')
-    subject_raw.columns = ['이름', '담당교과']
-    subject_raw = subject_raw.dropna()
+    teacher_assign_count = {name: 0 for name in teacher_list}
+    assigned_pairs = set()
+    used_combinations = defaultdict(set)
+    teacher_class_history = defaultdict(set)
 
-    homeroom_raw['담임여부'] = True
-    homeroom_raw['담임학년'] = homeroom_raw['학급'].str.extract(r'(\d)학년').astype(float)
-    homeroom_raw['담임반'] = homeroom_raw['학급'].str.extract(r'(\d)반').astype(float)
-    subject_raw['담임여부'] = False
-    subject_raw['담임학년'] = None
-    subject_raw['담임반'] = None
+    results = []
+    for (반, 교시), group in df.groupby(['반', '교시']):
+        과목들 = group['과목'].unique().tolist()
+        자습여부 = all(subj == '자습' for subj in 과목들)
 
-    teacher_df = pd.concat([
-        homeroom_raw[['이름', '담당교과', '담임여부', '담임학년', '담임반']],
-        subject_raw[['이름', '담당교과', '담임여부', '담임학년', '담임반']]
-    ], ignore_index=True)
+        제외 = set()
+        for subj in 과목들:
+            제외.update(teacher_part[teacher_part['담당과목'] == subj]['이름'].tolist())
+        for t in teacher_list:
+            if 교시 in teacher_exclude.get(t, []):
+                제외.add(t)
+            if 반.startswith(t[0]) and t in teacher_df.iloc[:, 2].tolist():  # 담임 교사 제외
+                제외.add(t)
+            if 반 in teacher_class_history[t]:
+                제외.add(t)
 
-    all_teachers = teacher_df['이름'].tolist()
+        후보 = [t for t in teacher_list if t not in 제외]
+        후보.sort(key=lambda x: teacher_assign_count[x])
 
-    # 가상의 시간표 시간대 정의 (예: 1교시~6교시 3일)
-    time_slots = [f"{day}일차 {period}교시" for day in range(1, 4) for period in range(1, 7)]
+        정, 부 = None, None
+        for t in 후보:
+            if 정 is None:
+                정 = t
+            elif 부 is None and (정, t) not in assigned_pairs and t != 정:
+                부 = t
+                break
 
-    schedule = defaultdict(lambda: {'정감독': [], '부감독': []})
-    total_assignments = Counter()
-    role_counts = defaultdict(lambda: {'정감독': 0, '부감독': 0})
+        teacher_assign_count[정] += 1
+        teacher_class_history[정].add(반)
+        if not 자습여부 and 부:
+            teacher_assign_count[부] += 1
+            teacher_class_history[부].add(반)
+            assigned_pairs.add((정, 부))
+            assigned_pairs.add((부, 정))
 
-    for time in time_slots:
-        random.shuffle(all_teachers)
-        assigned = set()
-        role_slots = {'정감독': total_rooms, '부감독': total_rooms}
-
-        for role in ['정감독', '부감독']:
-            for _ in range(role_slots[role]):
-                eligible = [c for c in all_teachers if c not in assigned and total_assignments[c] < min(total_assignments.values(), default=0) + 2]
-                if not eligible:
-                    break
-                selected = random.choice(eligible)
-                schedule[time][role].append(selected)
-                total_assignments[selected] += 1
-                role_counts[selected][role] += 1
-                assigned.add(selected)
-
-    st.subheader("시험 감독 배정 결과")
-    all_results = []
-    for time in sorted(schedule.keys()):
-        st.markdown(f"### {time}")
-        df = pd.DataFrame({
-            '시험실': [f"{i+1}반" for i in range(total_rooms)],
-            '정감독': schedule[time]['정감독'][:total_rooms],
-            '부감독': schedule[time]['부감독'][:total_rooms]
+        results.append({
+            '반': 반,
+            '교시': 교시,
+            '정감독': 정,
+            '부감독': 부 if not 자습여부 else None
         })
-        st.dataframe(df)
-        df.insert(0, '시간', time)
-        all_results.append(df)
 
-    st.subheader("감독 횟수 요약")
-    summary = pd.DataFrame([{ 
-        '이름': name, 
-        '정감독 횟수': counts['정감독'],
-        '부감독 횟수': counts['부감독'],
-        '총 감독 횟수': counts['정감독'] + counts['부감독']
-    } for name, counts in role_counts.items()])
-    st.dataframe(summary.sort_values(by='총 감독 횟수', ascending=False))
+    result_df = pd.DataFrame(results)
+    count_df = result_df.melt(id_vars=['반', '교시'], value_vars=['정감독', '부감독'],
+                              var_name='구분', value_name='교사').dropna()
+    stats_df = count_df['교사'].value_counts().reset_index()
+    stats_df.columns = ['교사', '총 감독 횟수']
 
-    st.subheader("엑셀 다운로드")
-    if all_results:
-        final_df = pd.concat(all_results, ignore_index=True)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-            with pd.ExcelWriter(tmp.name, engine='xlsxwriter') as writer:
-                final_df.to_excel(writer, index=False, sheet_name='배정표')
-                summary.to_excel(writer, index=False, sheet_name='감독요약')
-            with open(tmp.name, "rb") as f:
-                st.download_button(label="📥 배정표 엑셀 다운로드", data=f, file_name="감독_배정표.xlsx")
+    정감독_counts = result_df['정감독'].value_counts().reset_index()
+    정감독_counts.columns = ['교사', '정감독 횟수']
+    부감독_counts = result_df['부감독'].value_counts().reset_index()
+    부감독_counts.columns = ['교사', '부감독 횟수']
+
+    stats_df = stats_df.merge(정감독_counts, on='교사', how='left')
+    stats_df = stats_df.merge(부감독_counts, on='교사', how='left')
+    stats_df.fillna(0, inplace=True)
+    stats_df[['정감독 횟수', '부감독 횟수']] = stats_df[['정감독 횟수', '부감독 횟수']].astype(int)
+
+    return result_df, stats_df
